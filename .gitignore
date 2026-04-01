@@ -1,0 +1,12 @@
+# Node modulok (nagyon sok fájl)
+node_modules/
+
+# Bot adatok (lokális, generált)
+bot_data.json
+
+# Python cache (ha van)
+__pycache__/
+*.pyc
+
+# Lokális ideiglenes fájlok
+*.log
