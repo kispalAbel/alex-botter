@@ -1,15 +1,25 @@
 {
-  "name": "alex",
+  "name": "minecraft-ip-burst-tester",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Burst-based Minecraft connection tester for IP rate-limit and anti-bot validation.",
+  "main": "bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.js",
+    "check": "node --check bot.js"
   },
-  "keywords": [],
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "load-test",
+    "anti-bot"
+  ],
   "author": "",
-  "license": "ISC",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
+    "minecraft-protocol": "^1.64.0",
     "mineflayer": "^4.37.0"
   }
 }
