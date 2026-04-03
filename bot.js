@@ -1,4 +1,5 @@
 const minecraftProtocol = require('minecraft-protocol')
+const https = require('https')
 const net = require('net')
 const fs = require('fs')
 const path = require('path')
@@ -31,6 +32,7 @@ const DEFAULT_CONFIG = {
   startWith: 'bot',
   usernameLength: 12,
   passwordLength: 12,
+  savedAccountFailureLimit: 3,
   accountsFile: 'stored_bots.json',
   registerCommand: '/register {password} {password}',
   loginCommand: '/login {password}',
@@ -115,6 +117,53 @@ function applyConfigDefaults(target, defaults) {
   return changed
 }
 
+function isLoopbackHost(host) {
+  const normalized = String(host ?? '').trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1'
+}
+
+function fetchPublicIpv4() {
+  return new Promise((resolve, reject) => {
+    const request = https.get('https://api.ipify.org', { timeout: 5000 }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume()
+        reject(new Error(`public IP lookup failed with HTTP ${response.statusCode}`))
+        return
+      }
+
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk) => {
+        body += chunk
+      })
+      response.on('end', () => {
+        const ip = body.trim()
+        if (net.isIP(ip) !== 4) {
+          reject(new Error(`public IP lookup returned invalid IPv4 "${ip}"`))
+          return
+        }
+
+        resolve(ip)
+      })
+    })
+
+    request.on('timeout', () => {
+      request.destroy(new Error('public IP lookup timed out'))
+    })
+    request.on('error', reject)
+  })
+}
+
+async function resolveTargetHost(host, useProxy) {
+  if (!useProxy || !isLoopbackHost(host)) {
+    return host
+  }
+
+  const publicIpv4 = await fetchPublicIpv4()
+  console.log(`Loopback host detected in proxy mode, resolved target host to public IPv4 ${publicIpv4}`)
+  return publicIpv4
+}
+
 createLogger()
 
 function loadConfig() {
@@ -159,6 +208,7 @@ function loadConfig() {
     commandDelayMs: Number(config.commandDelayMs ?? 700),
     usernameLength: Number(config.usernameLength ?? 12),
     passwordLength: Number(config.passwordLength ?? 12),
+    savedAccountFailureLimit: Number(config.savedAccountFailureLimit ?? 3),
     accountsFile: String(config.accountsFile ?? 'stored_bots.json'),
     registerCommand: String(config.registerCommand ?? '/register {password} {password}'),
     loginCommand: String(config.loginCommand ?? '/login {password}'),
@@ -241,6 +291,7 @@ function validateConfig(config) {
     'commandDelayMs',
     'usernameLength',
     'passwordLength',
+    'savedAccountFailureLimit',
     'disconnectWaveWindowMs',
     'disconnectWaveMinCount',
     'disconnectWaveRatio'
@@ -420,9 +471,9 @@ function buildProxyList(entries) {
 }
 
 async function preflightPing(config) {
-  console.log(`Preflight ping: ${config.host}:${config.port}`)
+  console.log(`Preflight ping: ${targetHost}:${config.port}`)
   const response = await minecraftProtocol.ping({
-    host: config.host,
+    host: targetHost,
     port: config.port,
     version: config.version || undefined,
     closeTimeout: config.probeTimeoutMs,
@@ -450,7 +501,10 @@ function loadAccounts(filePath) {
       .filter((entry) => entry && typeof entry.username === 'string' && typeof entry.password === 'string')
       .map((entry) => ({
         username: entry.username,
-        password: entry.password
+        password: entry.password,
+        proxyHost: typeof entry.proxyHost === 'string' && entry.proxyHost.length > 0 ? entry.proxyHost : null,
+        proxyPort: Number.isInteger(entry.proxyPort) && entry.proxyPort > 0 ? entry.proxyPort : null,
+        restoreFailures: Number.isInteger(entry.restoreFailures) && entry.restoreFailures > 0 ? entry.restoreFailures : 0
       }))
   } catch (error) {
     console.log(`Figyelem: nem tudtam beolvasni az account fajlt: ${error.message}`)
@@ -469,6 +523,7 @@ const proxyAuth = {
   username: String(config.proxyAuth.username),
   password: String(config.proxyAuth.password)
 }
+let targetHost = config.host
 
 const ACCOUNTS_PATH = path.join(__dirname, config.accountsFile)
 const accounts = loadAccounts(ACCOUNTS_PATH)
@@ -476,6 +531,7 @@ const savedQueue = accounts.map((entry) => ({ ...entry }))
 const activeBots = new Set()
 const onlineBots = new Map()
 const disconnectEvents = []
+const onlineProxyUsage = new Map()
 
 const stats = {
   launchAttempts: 0,
@@ -495,16 +551,69 @@ let launchPhaseFinished = false
 let launchStoppedByFailure = false
 let shuttingDown = false
 let successTriggered = false
-let nextProxyIndex = 0
+function getProxyKey(proxy) {
+  if (!proxy) {
+    return null
+  }
 
-function getNextProxy() {
+  return `${proxy.host}:${proxy.port}`
+}
+
+function findConfiguredProxy(entry) {
+  if (!entry || typeof entry.proxyHost !== 'string' || !Number.isInteger(entry.proxyPort)) {
+    return null
+  }
+
+  return proxies.find((proxy) => getProxyKey(proxy) === `${entry.proxyHost}:${entry.proxyPort}`) ?? null
+}
+
+function getLeastUsedProxy() {
   if (proxies.length === 0) {
     return null
   }
 
-  const proxy = proxies[nextProxyIndex]
-  nextProxyIndex = (nextProxyIndex + 1) % proxies.length
-  return proxy
+  let lowestUsage = Number.POSITIVE_INFINITY
+  const candidates = []
+
+  for (const proxy of proxies) {
+    const usage = onlineProxyUsage.get(getProxyKey(proxy)) ?? 0
+    if (usage < lowestUsage) {
+      lowestUsage = usage
+      candidates.length = 0
+      candidates.push(proxy)
+      continue
+    }
+
+    if (usage === lowestUsage) {
+      candidates.push(proxy)
+    }
+  }
+
+  return candidates[Math.floor(Math.random() * candidates.length)] ?? proxies[0]
+}
+
+function incrementProxyUsage(proxy) {
+  const proxyKey = getProxyKey(proxy)
+  if (!proxyKey) {
+    return
+  }
+
+  onlineProxyUsage.set(proxyKey, (onlineProxyUsage.get(proxyKey) ?? 0) + 1)
+}
+
+function decrementProxyUsage(proxy) {
+  const proxyKey = getProxyKey(proxy)
+  if (!proxyKey) {
+    return
+  }
+
+  const nextValue = (onlineProxyUsage.get(proxyKey) ?? 1) - 1
+  if (nextValue <= 0) {
+    onlineProxyUsage.delete(proxyKey)
+    return
+  }
+
+  onlineProxyUsage.set(proxyKey, nextValue)
 }
 
 function connectSocket(socketOptions) {
@@ -624,11 +733,14 @@ async function createTransportSocket(targetHost, targetPort, proxy) {
   return establishHttpTunnel(proxy, targetHost, targetPort)
 }
 
-function upsertAccount(credentials) {
+function upsertAccount(credentials, proxy = null) {
   const index = accounts.findIndex((entry) => entry.username === credentials.username)
   const nextEntry = {
     username: credentials.username,
-    password: credentials.password
+    password: credentials.password,
+    proxyHost: proxy?.host ?? null,
+    proxyPort: proxy?.port ?? null,
+    restoreFailures: 0
   }
 
   if (index === -1) {
@@ -651,6 +763,26 @@ function removeAccount(username, reason) {
   stats.removedAccounts += 1
   console.log(`[${username}] removed from accounts file (${reason})`)
   return true
+}
+
+function noteSavedAccountFailure(username, reason) {
+  const entry = accounts.find((account) => account.username === username)
+  if (!entry) {
+    return { removed: false, failures: 0 }
+  }
+
+  entry.restoreFailures = (Number.isInteger(entry.restoreFailures) ? entry.restoreFailures : 0) + 1
+  persistAccounts(ACCOUNTS_PATH, accounts)
+  console.log(
+    `[${username}] saved restore failed (${reason}), consecutive failures ${entry.restoreFailures}/${config.savedAccountFailureLimit}`
+  )
+
+  if (entry.restoreFailures >= config.savedAccountFailureLimit) {
+    removeAccount(username, `saved_restore_failures:${reason}`)
+    return { removed: true, failures: entry.restoreFailures }
+  }
+
+  return { removed: false, failures: entry.restoreFailures }
 }
 
 function clearAccounts(reason) {
@@ -889,6 +1021,10 @@ function attachPersistentLogging(bot, credentials) {
   bot.on('error', (error) => {
     stats.errors += 1
     console.log(`[${credentials.username}] error: ${error.message}`)
+
+    if (!onlineBots.has(credentials.username)) {
+      closeBot(bot, 'client-error')
+    }
   })
 
   bot.on('end', (reason) => {
@@ -896,8 +1032,11 @@ function attachPersistentLogging(bot, credentials) {
     activeBots.delete(bot)
 
     if (onlineBots.has(credentials.username)) {
+      decrementProxyUsage(bot.assignedProxy ?? null)
       onlineBots.delete(credentials.username)
-      recordDisconnectWave()
+      if (!shuttingDown) {
+        recordDisconnectWave()
+      }
     }
 
     console.log(`[${credentials.username}] end: ${formatReason(reason)}`)
@@ -936,7 +1075,7 @@ async function runSavedAccountFlow(bot, credentials) {
     const registerResult = await waitForSignal(bot, config.authTimeoutMs)
     if (registerResult.type === 'register_success') {
       stats.registerSuccess += 1
-      upsertAccount(credentials)
+      upsertAccount(credentials, credentials.proxy ?? null)
       return finishLogin(bot, credentials)
     }
 
@@ -958,7 +1097,7 @@ async function runNewAccountFlow(bot, credentials) {
   const registerResult = await waitForSignal(bot, config.authTimeoutMs)
   if (registerResult.type === 'register_success') {
     stats.registerSuccess += 1
-    upsertAccount(credentials)
+    upsertAccount(credentials, credentials.proxy ?? null)
     return finishLogin(bot, credentials)
   }
 
@@ -967,7 +1106,7 @@ async function runNewAccountFlow(bot, credentials) {
   }
 
   if (registerResult.type === 'login_success') {
-    upsertAccount(credentials)
+    upsertAccount(credentials, credentials.proxy ?? null)
     return { ok: true }
   }
 
@@ -975,11 +1114,26 @@ async function runNewAccountFlow(bot, credentials) {
 }
 
 async function attemptBot(candidate, attemptNumber) {
+  if (candidate.missingSavedProxy) {
+    console.log(`[${candidate.username}] saved proxy ${candidate.proxyHost}:${candidate.proxyPort} is not in current config, skipping account`)
+    return {
+      ok: false,
+      retryable: false,
+      result: { type: 'missing_saved_proxy' },
+      credentials: {
+        username: candidate.username,
+        password: candidate.password
+      }
+    }
+  }
+
   const credentials = {
     username: candidate.username,
-    password: candidate.password
+    password: candidate.password,
+    proxy: candidate.proxy ?? null
   }
-  const proxy = getNextProxy()
+  const proxy = credentials.proxy ?? getLeastUsedProxy()
+  credentials.proxy = proxy
 
   stats.launchAttempts += 1
   console.log(`[${credentials.username}] attempt ${attemptNumber + 1}/${config.retryCount + 1} (${candidate.source})`)
@@ -988,13 +1142,13 @@ async function attemptBot(candidate, attemptNumber) {
   }
 
   const bot = createLeanBot({
-    host: config.host,
+    host: targetHost,
     port: config.port,
     username: credentials.username,
     version: config.version,
     connectTimeout: config.connectTimeoutMs,
     connect: (client) => {
-      createTransportSocket(config.host, config.port, proxy)
+      createTransportSocket(targetHost, config.port, proxy)
         .then((socket) => {
           client.setSocket(socket)
           client.emit('connect')
@@ -1026,23 +1180,28 @@ async function attemptBot(candidate, attemptNumber) {
     : await runNewAccountFlow(bot, credentials)
 
   if (!authResult.ok) {
+    const shouldRetrySameUsername = authResult.removeAccount !== true && bot.hasSessionStarted() !== true
+
     if (authResult.removeAccount) {
       removeAccount(credentials.username, authResult.result?.type || 'invalid_saved_account')
     }
     closeBot(bot, `auth-failed:${authResult.result?.type || 'unknown'}`)
     return {
       ok: false,
-      retryable: !authResult.removeAccount,
+      retryable: !authResult.removeAccount && shouldRetrySameUsername,
       result: authResult.result,
       credentials,
-      usernameCollision: authResult.usernameCollision === true
+      usernameCollision: authResult.usernameCollision === true,
+      sessionStarted: bot.hasSessionStarted() === true
     }
   }
 
   stats.loginSuccess += 1
+  bot.assignedProxy = credentials.proxy ?? null
   onlineBots.set(credentials.username, bot)
+  incrementProxyUsage(credentials.proxy ?? null)
   highestOnlineCount = Math.max(highestOnlineCount, onlineBots.size)
-  upsertAccount(credentials)
+  upsertAccount(credentials, credentials.proxy ?? null)
   console.log(`[${credentials.username}] login confirmed, bot kept online (${onlineBots.size}/${config.targetOnlineBots})`)
   return { ok: true, credentials }
 }
@@ -1075,23 +1234,40 @@ async function runCandidate(candidate) {
 function nextCandidate(index) {
   if (savedQueue.length > 0) {
     const saved = savedQueue.shift()
+    const savedProxy = findConfiguredProxy(saved)
     return {
       username: saved.username,
       password: saved.password,
-      source: 'saved'
+      source: 'saved',
+      proxy: savedProxy,
+      proxyHost: saved.proxyHost ?? null,
+      proxyPort: saved.proxyPort ?? null,
+      restoreFailures: saved.restoreFailures ?? 0,
+      missingSavedProxy: saved.proxyHost != null && saved.proxyPort != null && savedProxy == null
     }
   }
 
   stats.generatedAccounts += 1
-    return {
-      username: buildUsername(config),
-      password: buildPassword(config),
-      source: 'new'
-    }
+  return {
+    username: buildUsername(config),
+    password: buildPassword(config),
+    source: 'new',
+    proxy: getLeastUsedProxy()
+  }
 }
 
 async function runCampaign() {
-  console.log(`Target: ${config.host}:${config.port}`)
+  try {
+    targetHost = await resolveTargetHost(config.host, proxies.length > 0)
+  } catch (error) {
+    launchPhaseFinished = true
+    launchStoppedByFailure = true
+    console.error(`Target host resolution failed: ${error.message}`)
+    maybeExit()
+    return
+  }
+
+  console.log(`Target: ${targetHost}:${config.port}`)
   console.log('Only use this script for your own localhost or servers you control for anti-bot testing.')
   console.log(`Saved accounts at startup: ${savedQueue.length}`)
   console.log(`Goal: keep ${config.targetOnlineBots} bot(s) online from the same IP until the anti-bot blocks the source IP.`)
@@ -1099,11 +1275,15 @@ async function runCampaign() {
   try {
     await preflightPing(config)
   } catch (error) {
-    launchPhaseFinished = true
-    launchStoppedByFailure = true
-    console.error(`Preflight ping failed: ${error.message}`)
-    maybeExit()
-    return
+    if (proxies.length > 0) {
+      console.warn(`Preflight ping failed, continuing with proxy connections: ${error.message}`)
+    } else {
+      launchPhaseFinished = true
+      launchStoppedByFailure = true
+      console.error(`Preflight ping failed: ${error.message}`)
+      maybeExit()
+      return
+    }
   }
 
   let candidateIndex = 0
@@ -1115,6 +1295,8 @@ async function runCampaign() {
 
     if (!result.ok) {
       if (candidate.source === 'saved') {
+        const failureReason = result.result?.type || (result.terminal ? 'terminal' : 'unknown')
+        noteSavedAccountFailure(candidate.username, failureReason)
         console.log(`[${candidate.username}] saved account could not be restored`)
       } else {
         console.log(`[${candidate.username}] generated account failed`)

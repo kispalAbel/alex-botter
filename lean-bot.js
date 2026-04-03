@@ -96,6 +96,18 @@ function createLeanBot(options) {
   }
   let positionHeartbeat = null
 
+  function writePacket(packetName, payload) {
+    try {
+      client.write(packetName, payload)
+    } catch (error) {
+      const packetError = new Error(`Packet write failed for ${packetName}: ${error.message}`)
+      packetError.cause = error
+      packetError.packetName = packetName
+      packetError.packetPayload = payload
+      throw packetError
+    }
+  }
+
   function emitSpawnOnce() {
     if (spawned) return
     spawned = true
@@ -107,7 +119,10 @@ function createLeanBot(options) {
       x: position.x,
       y: position.y,
       z: position.z,
-      onGround: position.onGround
+      flags: {
+        onGround: position.onGround,
+        hasHorizontalCollision: undefined
+      }
     }
 
     if (packetName === 'position_look') {
@@ -115,7 +130,7 @@ function createLeanBot(options) {
       payload.pitch = position.pitch
     }
 
-    client.write(packetName, payload)
+    writePacket(packetName, payload)
   }
 
   function startPositionHeartbeat() {
@@ -146,16 +161,16 @@ function createLeanBot(options) {
       return
     }
 
-    client.write('chat', { message })
+    writePacket('chat', { message })
   }
 
   bot.acceptResourcePack = () => {
     if (mcData.supportFeature('resourcePackUsesHash')) {
-      client.write('resource_pack_receive', {
+      writePacket('resource_pack_receive', {
         result: RESOURCE_PACK_RESULTS.ACCEPTED,
         hash: latestResourcePackHash
       })
-      client.write('resource_pack_receive', {
+      writePacket('resource_pack_receive', {
         result: RESOURCE_PACK_RESULTS.SUCCESSFULLY_LOADED,
         hash: latestResourcePackHash
       })
@@ -163,21 +178,21 @@ function createLeanBot(options) {
     }
 
     if (mcData.supportFeature('resourcePackUsesUUID')) {
-      client.write('resource_pack_receive', {
+      writePacket('resource_pack_receive', {
         uuid: latestResourcePackUuid,
         result: RESOURCE_PACK_RESULTS.ACCEPTED
       })
-      client.write('resource_pack_receive', {
+      writePacket('resource_pack_receive', {
         uuid: latestResourcePackUuid,
         result: RESOURCE_PACK_RESULTS.SUCCESSFULLY_LOADED
       })
       return
     }
 
-    client.write('resource_pack_receive', {
+    writePacket('resource_pack_receive', {
       result: RESOURCE_PACK_RESULTS.ACCEPTED
     })
-    client.write('resource_pack_receive', {
+    writePacket('resource_pack_receive', {
       result: RESOURCE_PACK_RESULTS.SUCCESSFULLY_LOADED
     })
   }
@@ -197,7 +212,7 @@ function createLeanBot(options) {
   })
 
   client.on('login', (packet) => {
-    client.write('settings', {
+    writePacket('settings', {
       locale: 'en_US',
       viewDistance: 2,
       chatFlags: 0,
@@ -205,7 +220,8 @@ function createLeanBot(options) {
       skinParts: 0,
       mainHand: 1,
       enableTextFiltering: false,
-      enableServerListing: false
+      enableServerListing: false,
+      particleStatus: 'minimal'
     })
 
     bot.emit('login', packet)
@@ -221,7 +237,7 @@ function createLeanBot(options) {
     position.onGround = false
 
     if (mcData.supportFeature('teleportUsesOwnPacket') && packet.teleportId !== undefined) {
-      client.write('teleport_confirm', { teleportId: packet.teleportId })
+      writePacket('teleport_confirm', { teleportId: packet.teleportId })
     }
 
     writePositionPacket('position_look')
@@ -260,6 +276,8 @@ function createLeanBot(options) {
     stopPositionHeartbeat()
     bot.emit('end', reason)
   })
+
+  bot.hasSessionStarted = () => spawned
 
   return bot
 }
