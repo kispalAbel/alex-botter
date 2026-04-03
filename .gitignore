@@ -3,4 +3,5 @@ node22.zip
 node_modules.zip
 stored_bots.json
 config.json
+logs/
 *.log

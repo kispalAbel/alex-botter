@@ -1,8 +1,9 @@
-const mineflayer = require('mineflayer')
 const minecraftProtocol = require('minecraft-protocol')
 const net = require('net')
 const fs = require('fs')
 const path = require('path')
+const { createLeanBot } = require('./lean-bot')
+const { createLogger } = require('./logger')
 
 const CONFIG_PATH = path.join(__dirname, 'config.json')
 const DEFAULT_CONFIG = {
@@ -113,6 +114,8 @@ function applyConfigDefaults(target, defaults) {
 
   return changed
 }
+
+createLogger()
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
@@ -984,7 +987,7 @@ async function attemptBot(candidate, attemptNumber) {
     console.log(`[${credentials.username}] using proxy ${proxy.host}:${proxy.port}`)
   }
 
-  const bot = mineflayer.createBot({
+  const bot = createLeanBot({
     host: config.host,
     port: config.port,
     username: credentials.username,
