@@ -5,6 +5,114 @@ const fs = require('fs')
 const path = require('path')
 
 const CONFIG_PATH = path.join(__dirname, 'config.json')
+const DEFAULT_CONFIG = {
+  proxyAuth: {
+    username: 'REPLACE_WITH_PROXY_USERNAME',
+    password: 'REPLACE_WITH_PROXY_PASSWORD'
+  },
+  proxies: [],
+  host: 'localhost',
+  port: 25565,
+  version: false,
+  targetOnlineBots: 10,
+  retryCount: 4,
+  retryDelayMs: 2000,
+  probeTimeoutMs: 5000,
+  connectTimeoutMs: 15000,
+  readyTimeoutMs: 15000,
+  authTimeoutMs: 15000,
+  nextBotDelayMs: 1000,
+  commandDelayMs: 700,
+  disconnectWaveWindowMs: 5000,
+  disconnectWaveMinCount: 5,
+  disconnectWaveRatio: 0.5,
+  fullyRandomNames: true,
+  startWith: 'bot',
+  usernameLength: 12,
+  passwordLength: 12,
+  accountsFile: 'stored_bots.json',
+  registerCommand: '/register {password} {password}',
+  loginCommand: '/login {password}',
+  registerPromptPatterns: [
+    '/register',
+    'please register',
+    'register to continue',
+    'regisztralj',
+    'regisztracio',
+    'elobb regisztralj',
+    'register first'
+  ],
+  registerSuccessPatterns: [
+    'successfully registered',
+    'registered successfully',
+    'sikeresen regisztralt',
+    'sikeres regisztracio'
+  ],
+  loginPromptPatterns: [
+    '/login',
+    'please login',
+    'login to continue',
+    'jelentkezz be',
+    'bejelentkezes'
+  ],
+  loginSuccessPatterns: [
+    'successfully logged in',
+    'logged in successfully',
+    'successful login',
+    'sikeresen bejelentkeztel',
+    'sikeres bejelentkezes',
+    'sikeresen beleptel'
+  ],
+  alreadyRegisteredPatterns: [
+    'already registered',
+    'account already exists',
+    'mar regisztralt',
+    'mar letezik'
+  ],
+  invalidPasswordPatterns: [
+    'wrong password',
+    'incorrect password',
+    'invalid password',
+    'hibas jelszo',
+    'rossz jelszo',
+    'masik jelszoval',
+    'another password'
+  ],
+  needsRegisterPatterns: [
+    'register first',
+    'please register first',
+    'elobb regisztralj',
+    'elobb regisztralnod kell'
+  ],
+  alreadyLoggedInPatterns: [
+    'already logged in',
+    'already authenticated',
+    'mar be vagy jelentkezve',
+    'mar hitelesitve vagy'
+  ]
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function applyConfigDefaults(target, defaults) {
+  let changed = false
+
+  for (const [key, defaultValue] of Object.entries(defaults)) {
+    if (!(key in target)) {
+      target[key] = structuredClone(defaultValue)
+      changed = true
+      continue
+    }
+
+    if (isPlainObject(defaultValue) && isPlainObject(target[key])) {
+      changed = applyConfigDefaults(target[key], defaultValue) || changed
+    }
+  }
+
+  return changed
+}
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
@@ -20,6 +128,12 @@ function loadConfig() {
     process.exit(1)
   }
 
+  const configWasUpdated = applyConfigDefaults(config, DEFAULT_CONFIG)
+  if (configWasUpdated) {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    console.log('A config.json kiegeszult a hianyzo alapertelmezett mezokkel.')
+  }
+
   if (!config.host || typeof config.host !== 'string') {
     console.error('Hiba: a config.json "host" mezoje kotelezo.')
     process.exit(1)
@@ -29,7 +143,8 @@ function loadConfig() {
     host: config.host,
     port: Number(config.port ?? 25565),
     version: config.version ?? false,
-    localAddresses: Array.isArray(config.localAddresses) ? config.localAddresses : [],
+    proxyAuth: config.proxyAuth ?? {},
+    proxies: Array.isArray(config.proxies) ? config.proxies : [],
     targetOnlineBots: Number(config.targetOnlineBots ?? 10),
     retryCount: Number(config.retryCount ?? 4),
     retryDelayMs: Number(config.retryDelayMs ?? 2000),
@@ -150,13 +265,28 @@ function validateConfig(config) {
     process.exit(1)
   }
 
-  if (!Array.isArray(config.localAddresses)) {
-    console.error('Hiba: a localAddresses tomb legyen, ha meg van adva.')
+  if (!Array.isArray(config.proxies)) {
+    console.error('Hiba: a proxies tomb legyen, ha meg van adva.')
     process.exit(1)
   }
 
-  if (config.localAddresses.some((value) => typeof value !== 'string' || value.trim().length === 0)) {
-    console.error('Hiba: a localAddresses csak nem ures szoveg elemeket tartalmazhat.')
+  if (config.proxies.length === 0) {
+    console.error('Hiba: legalabb egy proxy legyen megadva a proxies tombben.')
+    process.exit(1)
+  }
+
+  if (!config.proxyAuth || typeof config.proxyAuth !== 'object' || Array.isArray(config.proxyAuth)) {
+    console.error('Hiba: a proxyAuth objektum legyen.')
+    process.exit(1)
+  }
+
+  if (typeof config.proxyAuth.username !== 'string' || config.proxyAuth.username.length === 0) {
+    console.error('Hiba: a proxyAuth.username kotelezo.')
+    process.exit(1)
+  }
+
+  if (typeof config.proxyAuth.password !== 'string' || config.proxyAuth.password.length === 0) {
+    console.error('Hiba: a proxyAuth.password kotelezo.')
     process.exit(1)
   }
 }
@@ -236,6 +366,56 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function parseProxyEntry(entry, index) {
+  if (typeof entry === 'string') {
+    let parsed
+    try {
+      parsed = new URL(entry)
+    } catch (error) {
+      throw new Error(`Hiba: ervenytelen proxy URL a proxies[${index}] mezoben: ${error.message}`)
+    }
+
+    const protocol = parsed.protocol.replace(':', '').toLowerCase()
+    if (protocol !== 'http') {
+      throw new Error(`Hiba: csak http proxy tamogatott, proxies[${index}] = ${entry}`)
+    }
+
+    return {
+      type: protocol,
+      host: parsed.hostname,
+      port: Number(parsed.port || 1080)
+    }
+  }
+
+  if (!entry || typeof entry !== 'object') {
+    throw new Error(`Hiba: ervenytelen proxy bejegyzes a proxies[${index}] helyen.`)
+  }
+
+  const type = String(entry.type ?? 'http').toLowerCase()
+  if (type !== 'http') {
+    throw new Error(`Hiba: csak http proxy tamogatott, proxies[${index}].type = ${type}`)
+  }
+
+  if (typeof entry.host !== 'string' || entry.host.trim().length === 0) {
+    throw new Error(`Hiba: a proxies[${index}].host kotelezo.`)
+  }
+
+  const port = Number(entry.port ?? 1080)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Hiba: ervenytelen proxy port a proxies[${index}] helyen.`)
+  }
+
+  return {
+    type,
+    host: entry.host,
+    port
+  }
+}
+
+function buildProxyList(entries) {
+  return entries.map((entry, index) => parseProxyEntry(entry, index))
+}
+
 async function preflightPing(config) {
   console.log(`Preflight ping: ${config.host}:${config.port}`)
   const response = await minecraftProtocol.ping({
@@ -281,6 +461,11 @@ function persistAccounts(filePath, accounts) {
 
 const config = loadConfig()
 validateConfig(config)
+const proxies = buildProxyList(config.proxies)
+const proxyAuth = {
+  username: String(config.proxyAuth.username),
+  password: String(config.proxyAuth.password)
+}
 
 const ACCOUNTS_PATH = path.join(__dirname, config.accountsFile)
 const accounts = loadAccounts(ACCOUNTS_PATH)
@@ -307,16 +492,133 @@ let launchPhaseFinished = false
 let launchStoppedByFailure = false
 let shuttingDown = false
 let successTriggered = false
-let nextLocalAddressIndex = 0
+let nextProxyIndex = 0
 
-function getNextLocalAddress() {
-  if (config.localAddresses.length === 0) {
+function getNextProxy() {
+  if (proxies.length === 0) {
     return null
   }
 
-  const localAddress = config.localAddresses[nextLocalAddressIndex]
-  nextLocalAddressIndex = (nextLocalAddressIndex + 1) % config.localAddresses.length
-  return localAddress
+  const proxy = proxies[nextProxyIndex]
+  nextProxyIndex = (nextProxyIndex + 1) % proxies.length
+  return proxy
+}
+
+function connectSocket(socketOptions) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(socketOptions)
+    const onError = (error) => reject(error)
+
+    socket.once('error', onError)
+    socket.once('connect', () => {
+      socket.removeListener('error', onError)
+      resolve(socket)
+    })
+  })
+}
+
+function writeToSocket(socket, buffer) {
+  return new Promise((resolve, reject) => {
+    socket.write(buffer, (error) => {
+      if (error) {
+        reject(error)
+        return
+      }
+
+      resolve()
+    })
+  })
+}
+
+function readHttpHeaders(socket) {
+  return new Promise((resolve, reject) => {
+    let buffered = Buffer.alloc(0)
+    const delimiter = Buffer.from('\r\n\r\n')
+
+    const cleanup = () => {
+      socket.removeListener('data', onData)
+      socket.removeListener('error', onError)
+      socket.removeListener('close', onClose)
+      socket.removeListener('end', onEnd)
+    }
+
+    const onData = (chunk) => {
+      buffered = Buffer.concat([buffered, chunk])
+      const headerEnd = buffered.indexOf(delimiter)
+      if (headerEnd === -1) {
+        return
+      }
+
+      cleanup()
+      const response = buffered.subarray(0, headerEnd + delimiter.length)
+      const remaining = buffered.subarray(headerEnd + delimiter.length)
+      if (remaining.length > 0) {
+        socket.unshift(remaining)
+      }
+      resolve(response.toString('utf8'))
+    }
+
+    const onError = (error) => {
+      cleanup()
+      reject(error)
+    }
+
+    const onClose = () => {
+      cleanup()
+      reject(new Error('proxy socket closed while waiting for CONNECT response'))
+    }
+
+    const onEnd = () => {
+      cleanup()
+      reject(new Error('proxy socket ended while waiting for CONNECT response'))
+    }
+
+    socket.on('data', onData)
+    socket.once('error', onError)
+    socket.once('close', onClose)
+    socket.once('end', onEnd)
+  })
+}
+
+async function establishHttpTunnel(proxy, targetHost, targetPort) {
+  const socketOptions = {
+    host: proxy.host,
+    port: proxy.port
+  }
+
+  const socket = await connectSocket(socketOptions)
+
+  const requestLines = [
+    `CONNECT ${targetHost}:${targetPort} HTTP/1.1`,
+    `Host: ${targetHost}:${targetPort}`,
+    'Proxy-Connection: Keep-Alive'
+  ]
+
+  if (proxyAuth.username || proxyAuth.password) {
+    const authToken = Buffer.from(`${proxyAuth.username}:${proxyAuth.password}`, 'utf8').toString('base64')
+    requestLines.push(`Proxy-Authorization: Basic ${authToken}`)
+  }
+
+  requestLines.push('', '')
+  await writeToSocket(socket, Buffer.from(requestLines.join('\r\n'), 'utf8'))
+
+  const response = await readHttpHeaders(socket)
+  const [statusLine] = response.split('\r\n')
+  const match = /^HTTP\/\d+\.\d+\s+(\d{3})/.exec(statusLine)
+  if (!match) {
+    throw new Error(`proxy connect failed: invalid response "${statusLine}"`)
+  }
+
+  const statusCode = Number(match[1])
+  if (statusCode !== 200) {
+    throw new Error(`proxy connect failed with HTTP status ${statusCode}`)
+  }
+
+  return socket
+}
+
+async function createTransportSocket(targetHost, targetPort, proxy) {
+  return establishHttpTunnel(proxy, targetHost, targetPort)
 }
 
 function upsertAccount(credentials) {
@@ -674,12 +976,12 @@ async function attemptBot(candidate, attemptNumber) {
     username: candidate.username,
     password: candidate.password
   }
-  const localAddress = getNextLocalAddress()
+  const proxy = getNextProxy()
 
   stats.launchAttempts += 1
   console.log(`[${credentials.username}] attempt ${attemptNumber + 1}/${config.retryCount + 1} (${candidate.source})`)
-  if (localAddress) {
-    console.log(`[${credentials.username}] using local address ${localAddress}`)
+  if (proxy) {
+    console.log(`[${credentials.username}] using proxy ${proxy.host}:${proxy.port}`)
   }
 
   const bot = mineflayer.createBot({
@@ -689,19 +991,15 @@ async function attemptBot(candidate, attemptNumber) {
     version: config.version,
     connectTimeout: config.connectTimeoutMs,
     connect: (client) => {
-      const socketOptions = {
-        host: config.host,
-        port: config.port
-      }
-
-      if (localAddress) {
-        socketOptions.localAddress = localAddress
-        socketOptions.localPort = 0
-      }
-
-      const socket = net.connect(socketOptions)
-      client.setSocket(socket)
-      socket.once('connect', () => client.emit('connect'))
+      createTransportSocket(config.host, config.port, proxy)
+        .then((socket) => {
+          client.setSocket(socket)
+          client.emit('connect')
+        })
+        .catch((error) => {
+          client.emit('error', error)
+          client.emit('end', error)
+        })
     }
   })
 
