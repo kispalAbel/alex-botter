@@ -39,7 +39,7 @@ npm start
 - `host`: server domain or IP
 - `port`: Minecraft port
 - `version`: leave `false` for auto-detect unless you need a fixed version
-- `targetOnlineBots`: target number of online bots to keep connected
+- `targetOnlineBots`: target number of online bots to keep connected, default `50`
 - `retryCount`: retry count per generated account
 - `retryDelayMs`: delay before retrying the same account
 - `probeTimeoutMs`: status ping timeout before the run starts
@@ -51,8 +51,9 @@ npm start
 - `disconnectWaveWindowMs`: rolling window for anti-bot success detection
 - `disconnectWaveMinCount`: minimum disconnect count required for success
 - `disconnectWaveRatio`: disconnect ratio threshold, default `0.5`
-- `usernamePrefix`: prefix for generated usernames
-- `usernameLength`: final generated username length, max 16
+- `fullyRandomNames`: if `true`, names are fully random
+- `startWith`: prefix used when `fullyRandomNames` is `false`
+- `usernameLength`: generated username length, max 16
 - `passwordLength`: generated password length
 - `accountsFile`: local JSON file that stores the generated credentials
 

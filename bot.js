@@ -37,7 +37,6 @@ function loadConfig() {
     authTimeoutMs: Number(config.authTimeoutMs ?? 15000),
     nextBotDelayMs: Number(config.nextBotDelayMs ?? 1000),
     commandDelayMs: Number(config.commandDelayMs ?? 700),
-    usernamePrefix: String(config.usernamePrefix ?? 'probe'),
     usernameLength: Number(config.usernameLength ?? 12),
     passwordLength: Number(config.passwordLength ?? 12),
     accountsFile: String(config.accountsFile ?? 'stored_bots.json'),
@@ -46,6 +45,8 @@ function loadConfig() {
     disconnectWaveWindowMs: Number(config.disconnectWaveWindowMs ?? 5000),
     disconnectWaveMinCount: Number(config.disconnectWaveMinCount ?? 5),
     disconnectWaveRatio: Number(config.disconnectWaveRatio ?? 0.5),
+    fullyRandomNames: config.fullyRandomNames !== false,
+    startWith: String(config.startWith ?? 'bot'),
     registerPromptPatterns: config.registerPromptPatterns ?? [
       '/register',
       'please register',
@@ -168,14 +169,35 @@ function randomString(length, chars) {
   return output
 }
 
-function buildUsername(index, config) {
-  const safePrefix = config.usernamePrefix.replace(/[^A-Za-z0-9_]/g, '').slice(0, 10) || 'probe'
-  const indexPart = String(index)
-  const base = `${safePrefix}${indexPart}`
-  const randomLength = Math.max(1, config.usernameLength - base.length)
-  const trimmedBase = base.slice(0, Math.max(1, config.usernameLength - randomLength))
-  const suffix = randomString(randomLength, 'abcdefghijklmnopqrstuvwxyz0123456789_')
-  return `${trimmedBase}${suffix}`.slice(0, 16)
+function buildUsername(config) {
+  const totalLength = Math.max(3, Math.min(16, config.usernameLength))
+  const firstCharChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  const restChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
+
+  if (config.fullyRandomNames) {
+    const firstChar = randomString(1, firstCharChars)
+    const rest = randomString(totalLength - 1, restChars)
+    return `${firstChar}${rest}`.slice(0, 16)
+  }
+
+  const safePrefix = config.startWith.replace(/[^A-Za-z0-9_]/g, '')
+  const trimmedPrefix = safePrefix.slice(0, Math.max(1, totalLength - 1))
+
+  if (trimmedPrefix.length === 0) {
+    const firstChar = randomString(1, firstCharChars)
+    const rest = randomString(totalLength - 1, restChars)
+    return `${firstChar}${rest}`.slice(0, 16)
+  }
+
+  const needsLeadingLetter = !/^[A-Za-z]/.test(trimmedPrefix)
+  const prefixBase = needsLeadingLetter
+    ? `${randomString(1, firstCharChars)}${trimmedPrefix}`
+    : trimmedPrefix
+
+  const finalPrefix = prefixBase.slice(0, totalLength)
+  const remaining = Math.max(0, totalLength - finalPrefix.length)
+  const suffix = randomString(remaining, restChars)
+  return `${finalPrefix}${suffix}`.slice(0, 16)
 }
 
 function buildPassword(config) {
@@ -209,8 +231,7 @@ async function preflightPing(config) {
     port: config.port,
     version: config.version || undefined,
     closeTimeout: config.probeTimeoutMs,
-    noPongTimeout: config.probeTimeoutMs,
-    connect: () => {}
+    noPongTimeout: config.probeTimeoutMs
   })
 
   const versionText = response?.version?.name ? ` version=${response.version.name}` : ''
@@ -719,11 +740,11 @@ function nextCandidate(index) {
   }
 
   stats.generatedAccounts += 1
-  return {
-    username: buildUsername(index, config),
-    password: buildPassword(config),
-    source: 'new'
-  }
+    return {
+      username: buildUsername(config),
+      password: buildPassword(config),
+      source: 'new'
+    }
 }
 
 async function runCampaign() {
