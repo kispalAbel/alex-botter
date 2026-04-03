@@ -1,93 +1,117 @@
-# Minecraft IP Burst Tester
+# Minecraft Proxy Rotation Tester
 
-This project is for validating a Minecraft server's anti-bot or IP rate-limit behavior from a single source IP.
+This project drives multiple lightweight Minecraft clients through a list of HTTP proxies to validate how your own server behaves under parallel connections.
 
-Use it only on localhost or servers you own and control.
+Use it only on localhost or on servers you own and control.
 
-The flow is:
+## Current branch behavior
 
-1. Ping the server first.
-2. If there are saved accounts in the local JSON file, try those first.
-3. For saved accounts, connect and send `/login`.
-4. If the server says the account must be registered first, send `/register` with the same stored password.
-5. If the server says the saved account is registered with another password, remove that account from the JSON file.
-6. After saved accounts are exhausted, generate a random username and password for new registrations.
-7. If a new registration succeeds, save the username and password in the local JSON file.
-8. If login succeeds, keep the bot online and move on to the next account.
-9. If more than 50 percent of the already-online bots are disconnected within 5 seconds, and that count is at least 5, treat the test as successful, clear the accounts file, log success, and stop.
+This `feature/proxy-rotation` branch uses:
 
-If the server sends a resource-pack request, the bot reports it as accepted and loaded without actually downloading it.
+- a shared `proxyAuth` username and password from `config.json`
+- a `proxies` list of concrete HTTP proxy endpoints
+- round-robin proxy assignment per generated client
+- a lean protocol client in [lean-bot.js](/d:/GitHub/alex-botter/lean-bot.js), not `mineflayer`
+- file logging in the local `logs/` directory via [logger.js](/d:/GitHub/alex-botter/logger.js)
+
+The main orchestration stays in [bot.js](/d:/GitHub/alex-botter/bot.js).
+
+## Flow
+
+1. Ping the target server.
+2. Load saved credentials from the configured accounts file.
+3. Reuse saved accounts first.
+4. If a saved account needs `/login`, send it.
+5. If a saved account suddenly needs `/register`, try registering it again with the stored password.
+6. If a saved account is clearly bound to another password, remove it from the saved accounts file.
+7. When saved accounts run out, generate new credentials.
+8. Register new accounts, then log them in.
+9. Keep successful clients online and continue until `targetOnlineBots` is reached.
+10. If a disconnect wave crosses the configured threshold, treat the run as a success and stop.
+
+If the server requests a resource pack, the client acknowledges it without downloading it.
+
+## Files
+
+- [bot.js](/d:/GitHub/alex-botter/bot.js): main runner, retry logic, auth flow, proxy assignment
+- [lean-bot.js](/d:/GitHub/alex-botter/lean-bot.js): minimal Minecraft client wrapper built on `minecraft-protocol`
+- [logger.js](/d:/GitHub/alex-botter/logger.js): console + file logger
+- `config.json`: local runtime config, intentionally ignored by Git on this branch
+- `stored_bots.json` or your configured accounts file: saved generated credentials
+- `logs/`: per-run log files
 
 ## Usage
 
-1. Install Node.js on the machine.
+1. Install Node.js.
 2. Install dependencies:
 
 ```bash
 npm install
 ```
 
-3. Edit [config.json](/d:/GitHub/alex-botter/config.json).
+3. Create or edit your local `config.json`.
 4. Start the tester:
 
 ```bash
 npm start
 ```
 
-## Main config fields
+## Config shape
 
-- `host`: server domain or IP
-- `port`: Minecraft port
-- `version`: leave `false` for auto-detect unless you need a fixed version
-- `targetOnlineBots`: target number of online bots to keep connected, default `50`
-- `retryCount`: retry count per generated account
-- `retryDelayMs`: delay before retrying the same account
-- `probeTimeoutMs`: status ping timeout before the run starts
-- `connectTimeoutMs`: connection timeout
-- `readyTimeoutMs`: time allowed to reach login or spawn before auth starts
-- `authTimeoutMs`: time allowed for register/login chat responses
-- `nextBotDelayMs`: delay before starting the next generated account
-- `commandDelayMs`: small delay before sending auth commands
-- `disconnectWaveWindowMs`: rolling window for anti-bot success detection
-- `disconnectWaveMinCount`: minimum disconnect count required for success
-- `disconnectWaveRatio`: disconnect ratio threshold, default `0.5`
-- `fullyRandomNames`: if `true`, names are fully random
-- `startWith`: prefix used when `fullyRandomNames` is `false`
-- `usernameLength`: generated username length, max 16
-- `passwordLength`: generated password length
-- `accountsFile`: local JSON file that stores the generated credentials
-
-## Auth behavior
-
-By default the script uses:
-
-- `registerCommand`
-- `loginCommand`
-
-It also watches chat messages for:
-
-- register success
-- login success
-- login prompt
-- register prompt
-- already registered responses
-- wrong password responses
-- register-first responses
-
-Those patterns can be customized in `config.json` if your auth plugin uses different text.
-
-## Saved credentials
-
-Successful registrations are written without hashing to the JSON file defined by `accountsFile`.
-
-Example config:
+The current branch expects a local `config.json` with this structure:
 
 ```json
 {
+  "proxyAuth": {
+    "username": "YOUR_PROXY_USERNAME",
+    "password": "YOUR_PROXY_PASSWORD"
+  },
+  "proxies": [
+    {
+      "type": "http",
+      "host": "31.59.20.176",
+      "port": 6754
+    }
+  ],
+  "host": "localhost",
+  "port": 25565,
+  "version": false,
   "targetOnlineBots": 10,
   "retryCount": 3,
-  "accountsFile": "registered_accounts.json",
+  "retryDelayMs": 5000,
+  "probeTimeoutMs": 5000,
+  "connectTimeoutMs": 15000,
+  "readyTimeoutMs": 15000,
+  "authTimeoutMs": 15000,
+  "nextBotDelayMs": 1000,
+  "commandDelayMs": 700,
+  "disconnectWaveWindowMs": 5000,
+  "disconnectWaveMinCount": 5,
+  "disconnectWaveRatio": 0.5,
+  "fullyRandomNames": false,
+  "startWith": "backuper_",
+  "usernameLength": 12,
+  "passwordLength": 12,
+  "accountsFile": "stored_bots.json",
   "registerCommand": "/register {password} {password}",
   "loginCommand": "/login {password}"
 }
 ```
+
+If top-level config keys are missing, [bot.js](/d:/GitHub/alex-botter/bot.js) writes default values back into `config.json`.
+
+## Important limits
+
+- This branch reduces client-side overhead by removing `mineflayer`, but it cannot stop bandwidth that the server already sends.
+- Real bandwidth savings still depend mostly on server-side packet reduction.
+- These proxies are treated as concrete HTTP CONNECT endpoints, one client per selected endpoint.
+
+## Logging
+
+Every run creates a log file under `logs/` named like:
+
+```text
+logs/run-2026-04-03T12-34-56-789Z.log
+```
+
+The console output is mirrored into that file, including uncaught exceptions and unhandled promise rejections.
