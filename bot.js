@@ -1,5 +1,6 @@
 const mineflayer = require('mineflayer')
 const minecraftProtocol = require('minecraft-protocol')
+const net = require('net')
 const fs = require('fs')
 const path = require('path')
 
@@ -28,6 +29,7 @@ function loadConfig() {
     host: config.host,
     port: Number(config.port ?? 25565),
     version: config.version ?? false,
+    localAddresses: Array.isArray(config.localAddresses) ? config.localAddresses : [],
     targetOnlineBots: Number(config.targetOnlineBots ?? 10),
     retryCount: Number(config.retryCount ?? 4),
     retryDelayMs: Number(config.retryDelayMs ?? 2000),
@@ -145,6 +147,16 @@ function validateConfig(config) {
 
   if (config.passwordLength < 4) {
     console.error('Hiba: a passwordLength legalabb 4 legyen.')
+    process.exit(1)
+  }
+
+  if (!Array.isArray(config.localAddresses)) {
+    console.error('Hiba: a localAddresses tomb legyen, ha meg van adva.')
+    process.exit(1)
+  }
+
+  if (config.localAddresses.some((value) => typeof value !== 'string' || value.trim().length === 0)) {
+    console.error('Hiba: a localAddresses csak nem ures szoveg elemeket tartalmazhat.')
     process.exit(1)
   }
 }
@@ -295,6 +307,17 @@ let launchPhaseFinished = false
 let launchStoppedByFailure = false
 let shuttingDown = false
 let successTriggered = false
+let nextLocalAddressIndex = 0
+
+function getNextLocalAddress() {
+  if (config.localAddresses.length === 0) {
+    return null
+  }
+
+  const localAddress = config.localAddresses[nextLocalAddressIndex]
+  nextLocalAddressIndex = (nextLocalAddressIndex + 1) % config.localAddresses.length
+  return localAddress
+}
 
 function upsertAccount(credentials) {
   const index = accounts.findIndex((entry) => entry.username === credentials.username)
@@ -651,16 +674,35 @@ async function attemptBot(candidate, attemptNumber) {
     username: candidate.username,
     password: candidate.password
   }
+  const localAddress = getNextLocalAddress()
 
   stats.launchAttempts += 1
   console.log(`[${credentials.username}] attempt ${attemptNumber + 1}/${config.retryCount + 1} (${candidate.source})`)
+  if (localAddress) {
+    console.log(`[${credentials.username}] using local address ${localAddress}`)
+  }
 
   const bot = mineflayer.createBot({
     host: config.host,
     port: config.port,
     username: credentials.username,
     version: config.version,
-    connectTimeout: config.connectTimeoutMs
+    connectTimeout: config.connectTimeoutMs,
+    connect: (client) => {
+      const socketOptions = {
+        host: config.host,
+        port: config.port
+      }
+
+      if (localAddress) {
+        socketOptions.localAddress = localAddress
+        socketOptions.localPort = 0
+      }
+
+      const socket = net.connect(socketOptions)
+      client.setSocket(socket)
+      socket.once('connect', () => client.emit('connect'))
+    }
   })
 
   activeBots.add(bot)
