@@ -9,7 +9,6 @@
   },
   "keywords": [
     "minecraft",
-    "mineflayer",
     "load-test",
     "anti-bot"
   ],
@@ -19,7 +18,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "minecraft-protocol": "^1.64.0",
-    "mineflayer": "^4.37.0"
+    "minecraft-protocol": "^1.64.0"
   }
 }
